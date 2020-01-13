@@ -72,7 +72,7 @@ namespace LargeCollections
       }
     }
 
-    private static readonly int s_maxBucketSize = 84_000 / IntPtr.Size;
+    private const int MaxBucketSize = 1_048_576;
     internal ArrayPool<T> _pool = ArrayPool<T>.Shared;
     private Bucket[] _buckets;
     private int _lastBucketIndex = -1;
@@ -92,7 +92,7 @@ namespace LargeCollections
 
     private void AddBucket(int startIdx, int size)
     {
-      var entries = this._pool.Rent(minimumLength: Math.Max(size, s_maxBucketSize));
+      var entries = this._pool.Rent(minimumLength: Math.Min(size, MaxBucketSize));
       var bucket = new Bucket(startIdx, entries);
       if (_lastBucketIndex == _buckets.Length - 2)
       {

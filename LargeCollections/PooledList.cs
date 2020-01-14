@@ -9,104 +9,46 @@ namespace LargeCollections
 {
   public class PooledList<T> : IList<T>, IDisposable
   {
-    private struct Bucket
-    {
-      public int StartIndex;
-      public int Count;
-
-      public T[] Entries;
-
-      public Bucket(int startIndex, T[] entries)
-      {
-        this.StartIndex = startIndex;
-        this.Count = 0;
-        this.Entries = entries;
-      }
-
-      public T GetItem(int index)
-      {
-        Debug.Assert(index - this.StartIndex < this.Count);
-        return Entries[index - this.StartIndex];
-      }
-
-      public void SetItem(int index, T item)
-      {
-        Debug.Assert(index - this.StartIndex < this.Count);
-        Entries[index - this.StartIndex] = item;
-      }
-
-      public void RemoveAt(int index)
-      {
-        var idx = index - this.StartIndex;
-        Debug.Assert(idx >= 0);
-        Debug.Assert(idx < this.Count);
-        if (idx == this.Count - 1)
-        {
-          this.Count--;
-        }
-        else
-        {
-          Array.Copy(Entries, idx + 1, Entries, idx, this.Count - idx);
-        }
-      }
-
-      public bool CanAdd() => this.Count < this.Entries.Length;
-
-      public void Add(T item)
-      {
-        Debug.Assert(CanAdd());
-        this.Entries[this.Count] = item;
-        this.Count++;
-      }
-
-      public int IndexOf(T item)
-      {
-        var idx = Array.IndexOf(this.Entries, item);
-        return (idx != -1) ? (this.StartIndex + idx) : -1;
-      }
-
-      public void Clear()
-      {
-        Debug.Assert(this.Count >= 0);
-        this.Count = 0;
-      }
-    }
-
-    private const int MaxBucketSize = 1_048_576;
-    internal ArrayPool<T> _pool = ArrayPool<T>.Shared;
-    private Bucket[] _buckets;
-    private int _lastBucketIndex = -1;
+    private const int BucketSize = 5000;
+    List<T[]> _buckets;
+    internal ArrayPool<T> _pool = ArrayPool<T>.Shared;//.Create(maxArrayLength: BucketSize * 2, maxArraysPerBucket: BucketSize);
     private int _count;
     private int _version;
 
     public PooledList()
     {
-      _buckets = new Bucket[5];
+      _buckets = new List<T[]>();
     }
 
     public PooledList(int initialCapacity)
     {
-      _buckets = new Bucket[5];
-      AddBucket(startIdx: 0, size: initialCapacity);
+      int bucketCount = GetBucketIndex(initialCapacity) + 1;
+      _buckets = new List<T[]>(bucketCount);
+      //for (int i = 0; i < bucketCount; i++)
+      //{
+      //  AddBucket();
+      //}
     }
 
-    private void AddBucket(int startIdx, int size)
+    private int GetBucketIndex(int index)
     {
-      var entries = this._pool.Rent(minimumLength: Math.Min(size, MaxBucketSize));
-      var bucket = new Bucket(startIdx, entries);
-      if (_lastBucketIndex == _buckets.Length - 2)
-      {
-        var newBuckets = new Bucket[_buckets.Length + 1];
-        Array.Copy(_buckets, 0, newBuckets, 0, _buckets.Length);
-        _buckets = newBuckets;
-      }
-      _buckets[++_lastBucketIndex] = bucket;
+      return index / BucketSize;
+    }
+
+    private int GetIndexInBucket(int index)
+    {
+      return index % BucketSize;
+    }
+
+    private void AddBucket()
+    {
+      _buckets.Add(_pool.Rent(minimumLength: BucketSize));
     }
 
     public T this[int index]
     {
-      get => FindBucket(index).GetItem(index);
-      set => FindBucket(index).SetItem(index, value);
+      get => FindBucket(index)[GetIndexInBucket(index)];
+      set => FindBucket(index)[GetIndexInBucket(index)] = value;
     }
 
     public int Count => _count;
@@ -115,52 +57,45 @@ namespace LargeCollections
 
     public void Add(T item)
     {
+      if (GetIndexInBucket(_count) == 0)
+      {
+        AddBucket();
+      }
+
+      _buckets[_buckets.Count - 1][GetIndexInBucket(_count)] = item;
       _count++;
-      if (_lastBucketIndex == -1)
-      {
-        AddBucket(startIdx: 0, size: 16);
-        ref Bucket lastBucket = ref _buckets[_lastBucketIndex];
-        lastBucket.Add(item);
-      }
-      else
-      {
-        ref Bucket lastBucket = ref _buckets[_lastBucketIndex];
-        if (!lastBucket.CanAdd())
-        {
-          AddBucket(
-            startIdx: lastBucket.StartIndex + lastBucket.Count,
-            size: lastBucket.Count * 2);
-          lastBucket = ref _buckets[_lastBucketIndex];
-        }
-        lastBucket.Add(item);
-      }
       _version++;
     }
 
     public void Clear()
     {
-      for (var i = 0; i <= _lastBucketIndex; i++)
+      for (var i = 0; i <= GetBucketIndex(_count); i++)
       {
-        _buckets[i].Clear();
+        Array.Clear(_buckets[i], 0, _buckets[i].Length);
       }
       _version++;
     }
 
     public bool Contains(T item)
     {
-      return this.IndexOf(item) != -1;
+      for (int i = 0; i < _buckets.Count; i++)
+      {
+        if (Array.IndexOf(_buckets[i], item) >= 0)
+        {
+          return true;
+        }
+      }
+      return false;
     }
 
     public void CopyTo(T[] array, int arrayIndex)
     {
-      for (var bucketIndex = 0; bucketIndex <= _lastBucketIndex; bucketIndex++)
+      Debug.Assert(arrayIndex < _count);
+      for (int i = 0; i < _buckets.Count; i++)
       {
-        ref Bucket bucket = ref _buckets[bucketIndex];
-        var entries = bucket.Entries;
-        for (int i = 0; i < _buckets[bucketIndex].Count; i++)
-        {
-          array[arrayIndex++] = entries[i];
-        }
+        int len = i == _buckets.Count - 1 ? GetIndexInBucket(_count - 1) + 1 : BucketSize;
+        Array.Copy(_buckets[i], 0, array, arrayIndex, len);
+        arrayIndex += len;
       }
     }
 
@@ -168,10 +103,10 @@ namespace LargeCollections
 
     public int IndexOf(T item)
     {
-      for (var i = 0; i <= _lastBucketIndex; i++)
+      for (int i = 0; i < _buckets.Count; i++)
       {
-        var idx = _buckets[i].IndexOf(item);
-        if (idx != -1)
+        var idx = Array.IndexOf(_buckets[i], item);
+        if (idx >= 0)
         {
           return idx;
         }
@@ -206,17 +141,9 @@ namespace LargeCollections
     IEnumerator IEnumerable.GetEnumerator() => new Enumerator(this);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ref Bucket FindBucket(int index)
+    private T[] FindBucket(int index)
     {
-      for (int i = 0; i <= _lastBucketIndex; i++)
-      {
-        if (_buckets[i].StartIndex + _buckets[i].Count > index)
-        {
-          Debug.Assert(_buckets[i].StartIndex >= index);
-          return ref _buckets[i];
-        }
-      }
-      throw new IndexOutOfRangeException();
+      return _buckets[GetBucketIndex(index)];
     }
 
     #region IDisposable Support
@@ -228,10 +155,9 @@ namespace LargeCollections
       {
         if (disposing)
         {
-          for (var i = 0; i <= _lastBucketIndex; i++)
+          for (var i = 0; i < _buckets.Count; i++)
           {
-            _buckets[i].Clear();
-            _pool.Return(_buckets[i].Entries);
+            _pool.Return(_buckets[i]);
           }
         }
 
